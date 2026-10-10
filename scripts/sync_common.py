@@ -34,9 +34,12 @@ non-empty media file. If the media disappears, the next run marks it
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 import re
 import stat
 import subprocess
@@ -54,9 +57,10 @@ from download_media import collect_media
 from platforms import collection_suffix
 
 
-IGNORED_MEDIA_SUFFIXES = {".json", ".description", ".part", ".ytdl"}
+IGNORED_MEDIA_SUFFIXES = {".json", ".md", ".description", ".part", ".ytdl"}
 INVALID_PATH_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
 WHITESPACE = re.compile(r"\s+")
+WINDOWS_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
 
 DownloadFn = Callable[
     [Path, str, Path, "Path | None", "str | None"], "tuple[bool, str]"
@@ -190,7 +194,8 @@ def safe_directory_name(value: str, fallback: str = "collection") -> str:
     name = unicodedata.normalize("NFKC", value)
     name = INVALID_PATH_CHARS.sub("_", name)
     name = WHITESPACE.sub(" ", name).strip(" .")
-    return name[:100] or fallback
+    name = name[:100].rstrip(" .") or fallback
+    return "_" + name if WINDOWS_RESERVED_NAME.match(name) else name
 
 
 def truncate_utf8(value: str, limit: int) -> str:
@@ -218,7 +223,8 @@ def safe_title(value: str, fallback: str = "", limit: int = 120) -> str:
         boundary = shortened.rfind(" ")
         if boundary > len(shortened) // 2:
             shortened = shortened[:boundary]
-    return shortened.strip(" .") or fallback
+    name = shortened.strip(" .") or fallback
+    return "_" + name if WINDOWS_RESERVED_NAME.match(name) else name
 
 
 #: yt-dlp's placeholder caption for a post that carries no title of its own.
@@ -514,7 +520,7 @@ class SyncLock:
     Today's collisions came from launchers double-clicked while a sync was
     already running: two navigators fought over one tab and one state file,
     and the loser enumerated whatever feed the winner's page happened to be
-    fetching. The lock is an ``flock`` held by the running process and
+    fetching. The lock is an OS file lock held by the running process and
     released by the kernel when it exits — crashed or killed included — so
     there is no stale lock to clean up, ever. Different platforms keep
     different locks: an Instagram sync and a Xiaohongshu sync drive
@@ -532,11 +538,15 @@ class SyncLock:
         self.directory.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             holder = ""
             try:
-                os.lseek(fd, 0, os.SEEK_SET)
+                os.lseek(fd, 1 if os.name == "nt" else 0, os.SEEK_SET)
                 raw = os.read(fd, 4096)
                 holder = json.loads(raw.decode("utf-8")) if raw.strip() else {}
             except (OSError, ValueError):
@@ -551,13 +561,19 @@ class SyncLock:
                 f"another {self.platform} sync is already running{detail}; "
                 "let it finish or stop it before starting a new one"
             ) from None
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, json.dumps({
-            "platform": self.platform,
-            "pid": os.getpid(),
-            "started": now_iso(),
-        }).encode("utf-8"))
+        self._fd = fd
+        try:
+            offset = 1 if os.name == "nt" else 0
+            os.lseek(fd, offset, os.SEEK_SET)
+            os.write(fd, json.dumps({
+                "platform": self.platform,
+                "pid": os.getpid(),
+                "started": now_iso(),
+            }).encode("utf-8"))
+            os.ftruncate(fd, os.lseek(fd, 0, os.SEEK_CUR))
+        except OSError:
+            self.release()
+            raise
         # Intentionally left open: the kernel releases the lock when this
         # process exits, which is the whole point.
         self._fd = fd
@@ -566,7 +582,11 @@ class SyncLock:
     def release(self) -> None:
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                if os.name == "nt":
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
             finally:
                 os.close(self._fd)
                 self._fd = None

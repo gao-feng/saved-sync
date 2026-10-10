@@ -1365,7 +1365,7 @@ class SessionDownloaderTest(unittest.TestCase):
                 stream=StringIO(),
             )
             self.assertEqual(second, 0)
-            self.assertEqual(json.loads((state).read_text())["items"]["DAbc123"]["status"], "completed")
+            self.assertEqual(json.loads((state).read_text(encoding="utf-8"))["items"]["DAbc123"]["status"], "completed")
 
     def test_parallel_jobs_download_everything(self):
         with MockInstagram() as mock_api, tempfile.TemporaryDirectory() as tmp:
@@ -1620,7 +1620,7 @@ class CliTest(unittest.TestCase):
         ])
         self.assertTrue(args.all_collections)
         self.assertIsNone(args.collection)
-        self.assertEqual(str(args.output_root), "/tmp/root")
+        self.assertEqual(args.output_root, Path("/tmp/root"))
 
     def test_launch_flag_defaults_off(self):
         parser = BROWSER_SYNC.build_parser()

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from platforms import PLATFORMS, detect_platform  # noqa: E402
 
 
-IGNORED_MEDIA_SUFFIXES = {".json", ".description", ".part", ".ytdl"}
+IGNORED_MEDIA_SUFFIXES = {".json", ".md", ".description", ".part", ".ytdl"}
 URL_PLACEHOLDER = "%(id)s_%(title).80B.%(ext)s"
 
 
@@ -396,6 +396,10 @@ def run(
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    if platform == "xiaohongshu":
+        import xhs_markdown
+        note_id = (manifest.get("metadata") or [{}])[0].get("id") or "笔记"
+        xhs_markdown.save(out, note_id, args.url, {})
     print(manifest_path)
     return 0
 

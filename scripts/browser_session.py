@@ -132,6 +132,18 @@ def find_browser(explicit: str | None = None) -> str:
         if Path(explicit).exists() or shutil.which(explicit):
             return explicit
         raise SessionError(f"browser not found: {explicit}")
+    if os.name == "nt":
+        for root in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"),
+                     os.environ.get("LOCALAPPDATA")):
+            if not root:
+                continue
+            for relative in ("Microsoft/Edge/Application/msedge.exe",
+                             "Google/Chrome/Application/chrome.exe",
+                             "BraveSoftware/Brave-Browser/Application/brave.exe",
+                             "Chromium/Application/chrome.exe"):
+                candidate = Path(root) / relative
+                if candidate.is_file():
+                    return str(candidate)
     for candidate in BROWSER_CANDIDATES:
         if Path(candidate).exists():
             return candidate
@@ -584,7 +596,10 @@ def safe_filename(value: str, fallback: str = "instagram") -> str:
     name = unicodedata.normalize("NFKC", value or "")
     name = _INVALID_FILENAME_CHARS.sub("_", name)
     name = re.sub(r"\s+", " ", name).strip(" .")
-    return name[:120] or fallback
+    name = name[:120].rstrip(" .") or fallback
+    if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", name, re.I):
+        name = "_" + name
+    return name
 
 
 def item_shortcode(item: dict) -> str:

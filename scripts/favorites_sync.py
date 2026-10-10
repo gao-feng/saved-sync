@@ -116,6 +116,8 @@ HOOK_JS = r"""
   state.awemes = state.awemes || {};
   state.folders = state.folders || [];
   state.api = state.api || [];
+  state.notes = state.notes || {};
+  state.comments = state.comments || {};
 
   let dirty = false;
   const persist = () => {
@@ -129,6 +131,11 @@ HOOK_JS = r"""
   function noteObject(node) {
     const id = ID_KEYS.map((key) => str(node[key])).find((value) => NOTE_RE.test(value));
     if (!id) return;
+    if (typeof node.desc === "string" && (node.imageList || node.image_list || node.video)) {
+      state.notes[id] = {title: node.title || "", description: node.desc,
+        author: (node.user || {}).nickname || ""};
+      dirty = true;
+    }
     for (const key of TOKEN_KEYS) {
       const token = str(node[key]);
       if (token.length > 16 && state.tokens[id] !== token) {
@@ -210,6 +217,10 @@ HOOK_JS = r"""
     let parsed = null;
     try { parsed = JSON.parse(text); } catch (err) { /* not JSON */ }
     if (parsed) walk(parsed, 0);
+    if (parsed && /\/comment\//.test(url || "") && parsed.data) {
+      state.comments[url] = parsed;
+      dirty = true;
+    }
     else {
       // Proximity pairing for the rare non-JSON payload.
       const re = /"xsec_?[Tt]oken"\s*:\s*"([^"]{16,})"/g;
@@ -267,6 +278,7 @@ HOOK_JS = r"""
   };
   globalThis.__ins2anki_harvest_clear = () => {
     state.tokens = {}; state.awemes = {}; state.folders = []; state.api = [];
+    state.notes = {}; state.comments = {};
     dirty = true; persist();
     return true;
   };
@@ -826,7 +838,7 @@ def _command_sync(args: argparse.Namespace) -> int:
     )
     output_dir = Path(args.output_dir)
     state_file = Path(args.state_file) if args.state_file else output_dir / "sync-state.json"
-    return sync_common.sync_items(
+    result = sync_common.sync_items(
         discovered,
         output_dir=output_dir,
         state_file=state_file,
@@ -840,6 +852,25 @@ def _command_sync(args: argparse.Namespace) -> int:
         limit=args.limit,
         jobs=max(args.jobs, 1),
     )
+    if args.platform == "xiaohongshu" and not args.dry_run:
+        import xhs_markdown
+        state = sync_common.load_state(state_file)
+        with open_session(args) as session:
+            for _, note_id, note_url in discovered[:args.limit] if args.limit else discovered:
+                item = state["items"].get(note_id, {})
+                directory = sync_common.item_directory(item, output_dir.resolve(), note_id)
+                if not (directory / "manifest.json").exists():
+                    continue
+                log(f"saving Markdown and visible comments: {note_id}")
+                try:
+                    capture = session.harvest(note_url, rounds=args.scroll_rounds,
+                        delay_ms=args.scroll_delay_ms, stable_rounds=args.scroll_rounds)
+                    xhs_markdown.save(directory, note_id, note_url, capture)
+                except Exception as exc:
+                    xhs_markdown.save(directory, note_id, note_url, {}, error=str(exc))
+                    log(f"warning: comments for {note_id}: {exc}")
+                    result = result or 1
+    return result
 
 
 def add_session_arguments(parser: argparse.ArgumentParser) -> None:

@@ -81,6 +81,27 @@ state never stores them.
 
 ## Usage
 
+### Windows
+
+安装 Python 3.10+、Edge 或 Chrome，并执行 `python -m pip install -U yt-dlp`。
+视频合并需要 ffmpeg（可用 `winget install --id=Gyan.FFmpeg -e` 安装）。
+双击根目录的 `同步小红书收藏.bat`、`同步抖音收藏.bat` 或
+`同步Instagram收藏.bat`；首次按提示在专用浏览器登录，然后回到终端按回车。
+小红书默认保存到 `xhs-saved/收藏/`，每篇目录包含 Markdown、评论 JSON 和媒体。
+`检查Instagram状态.bat` 可检查 Instagram 会话状态。
+
+启动器优先使用 `.codex-work/venv/Scripts/python.exe`，其次使用 `py -3`、`python`。
+支持 `INS2ANKI_OUTPUT`、`INS2ANKI_BROWSER`、`INS2ANKI_JOBS` 环境变量；
+小红书/抖音支持 `INS2ANKI_FOLDER`。也可以直接运行：
+
+```powershell
+python scripts/favorites_sync.py launch --platform xiaohongshu
+python scripts/favorites_sync.py sync --platform xiaohongshu --output-dir "xhs-saved/收藏"
+```
+
+Windows 使用系统字节锁阻止同平台重复同步；macOS/Linux 继续使用 `flock`。
+`.command` 启动器用于 macOS，Windows 使用 `.bat`。
+
 Inside an opencode session, give an Instagram URL and ask to study its English:
 
 > https://www.instagram.com/p/DYaN8HxT-pt/
@@ -283,6 +304,11 @@ python3 scripts/favorites_sync.py sync \
 ```
 
 只同步某一个收藏夹（侧栏里的名字）：加 `--folder 英语`。
+小红书同步会在每篇笔记目录生成 UTF-8 `post.md`，包含标题、正文、来源、作者、
+页面实际返回的评论和回复以及本地媒体链接；原始评论响应另存为 `comments.json`。
+已下载的笔记也会补充 Markdown。评论需要逐篇打开页面采集，因此同步会更慢。
+评论区分页、折叠回复或平台限制可能导致采集不完整，文件会明确标记这一点；
+`--scroll-rounds` 控制每篇笔记的滚动次数。清单/yt-dlp 回退路径不采集评论。
 补充开关：`--limit 5` 先试水、`--dry-run` 只列不下载、`--no-retry-failed` 跳过失败项、
 `diagnose` 打印页面实际调用了哪些接口（一条都抓不到时先看它）。
 

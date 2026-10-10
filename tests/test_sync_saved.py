@@ -362,8 +362,7 @@ class SyncLockTests(unittest.TestCase):
             )
             holder.acquire()
             try:
-                env = dict(os.environ, HOME=str(tmp))
-                with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(Path, "home", return_value=Path(tmp)):
                     out, err = StringIO(), StringIO()
                     with redirect_stdout(out), redirect_stderr(err):
                         code = FAVORITES.main([
