@@ -118,6 +118,7 @@ HOOK_JS = r"""
   state.api = state.api || [];
   state.notes = state.notes || {};
   state.comments = state.comments || {};
+  state.pagination = state.pagination || {};
 
   let dirty = false;
   const persist = () => {
@@ -217,6 +218,15 @@ HOOK_JS = r"""
     let parsed = null;
     try { parsed = JSON.parse(text); } catch (err) { /* not JSON */ }
     if (parsed) walk(parsed, 0);
+    if (parsed && /\/note\/collect\/page(?:\?|$)/.test(url || "")) {
+      const data = parsed.data || {};
+      state.pagination = {
+        has_more: typeof data.has_more === "boolean" ? data.has_more : null,
+        cursor: data.cursor || "",
+        error: parsed.success === false ? (parsed.msg || parsed.message || "pagination failed") : "",
+      };
+      dirty = true;
+    }
     if (parsed && /\/comment\//.test(url || "") && parsed.data) {
       state.comments[url] = parsed;
       dirty = true;
@@ -279,6 +289,7 @@ HOOK_JS = r"""
   globalThis.__ins2anki_harvest_clear = () => {
     state.tokens = {}; state.awemes = {}; state.folders = []; state.api = [];
     state.notes = {}; state.comments = {};
+    state.pagination = {};
     dirty = true; persist();
     return true;
   };
@@ -305,16 +316,30 @@ SCROLL_JS = r"""
       }
     }
   } catch (err) { /* the boot state is a bonus, not the source of truth */ }
+  const step = (globalThis.__ins2anki_scroll_step || 0) + 1;
+  globalThis.__ins2anki_scroll_step = step;
   for (const el of document.querySelectorAll("div, main, section, ul")) {
-    if (el.scrollHeight > el.clientHeight + 200) el.scrollTop = el.scrollHeight;
+    const style = getComputedStyle(el);
+    if (el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 200 &&
+        /auto|scroll/.test(style.overflowY)) {
+      el.scrollTop = step % 4 === 0 ? Math.max(0, el.scrollHeight - el.clientHeight - 300) : el.scrollHeight;
+    }
   }
-  window.scrollTo(0, document.body.scrollHeight);
+  const root = document.scrollingElement;
+  window.scrollTo(0, step % 4 === 0 ? Math.max(0, root.scrollHeight - innerHeight - 300) : root.scrollHeight);
+  const loading = [...document.querySelectorAll('.feeds-loading,.loading')].some(el => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight &&
+      getComputedStyle(el).visibility !== 'hidden' && /加载|loading/i.test(el.textContent || '');
+  });
   return {
     tokens: Object.keys(state.tokens || {}).length,
     awemes: Object.keys(state.awemes || {}).length,
     folders: (state.folders || []).length,
     api: (state.api || []).length,
     ready: document.readyState,
+    loading,
+    pagination: state.pagination || {},
   };
 })()
 """
@@ -542,24 +567,36 @@ class FavoritesSession:
         empty = 0
         previous = -1
         counts: dict = {}
+        stop_reason = "round_limit"
         for index in range(1, max(rounds, 1) + 1):
             counts = self.evaluate(SCROLL_JS, timeout=self.timeout) or {}
             total = int(counts.get("tokens", 0)) + int(counts.get("awemes", 0))
+            pagination = counts.get("pagination") or {}
+            waiting = counts.get("loading") or pagination.get("has_more") is True
             emit(
                 f"scroll {index}: {counts.get('tokens', 0)} note(s), "
                 f"{counts.get('awemes', 0)} douyin item(s), "
                 f"{counts.get('folders', 0)} folder candidate(s)"
             )
-            if total == 0:
+            if pagination.get("error"):
+                stop_reason = "pagination_error"
+                emit(f"warning: pagination failed: {pagination['error']}")
+                break
+            if waiting:
+                stable = 0
+                empty = 0
+            elif total == 0:
                 # The first page can take seconds to hydrate; an empty round
                 # must not eat into the stability budget or a slow boot ends
                 # the harvest with nothing.
                 empty += 1
                 if empty >= max(stable_rounds * 3, 10):
+                    stop_reason = "empty"
                     break
             elif total == previous:
                 stable += 1
                 if stable >= stable_rounds:
+                    stop_reason = "end" if pagination.get("has_more") is False else "stable"
                     break
             else:
                 stable = 0
@@ -567,6 +604,11 @@ class FavoritesSession:
             time.sleep(max(delay_ms, 200) / 1000.0)
 
         harvest = self.evaluate(READ_HARVEST_JS, timeout=self.timeout) or {}
+        if isinstance(harvest, dict):
+            harvest["discovery"] = {"stop_reason": stop_reason,
+                "complete": stop_reason == "end", "count": total}
+            if stop_reason != "end":
+                emit(f"warning: collection completeness unconfirmed ({stop_reason}); captured {total} item(s)")
         return harvest if isinstance(harvest, dict) else {}
 
     def resolve_uid(self) -> str:
@@ -821,6 +863,9 @@ def _command_sync(args: argparse.Namespace) -> int:
         return 2
 
     log(f"captured {len(discovered)} item(s); starting the incremental download")
+    discovery = (harvest.get("discovery") or {}) if args.platform == "xiaohongshu" else {}
+    if discovery and not discovery.get("complete"):
+        log("warning: this is a partial/unconfirmed collection; downloaded items will be kept")
     records = awemes_of(harvest) if args.platform == "douyin" else {}
     download_fn = (
         douyin_download_fn({record["url"]: record for record in records.values()})
@@ -843,6 +888,12 @@ def _command_sync(args: argparse.Namespace) -> int:
         limit=args.limit,
         jobs=max(args.jobs, 1),
     )
+    if discovery:
+        state = sync_common.load_state(state_file)
+        state["discovery"] = discovery
+        sync_common.write_json_atomic(state_file, state)
+        if not discovery.get("complete"):
+            result = result or 2
     if args.platform == "xiaohongshu" and not args.dry_run:
         import xhs_markdown
         state = sync_common.load_state(state_file)

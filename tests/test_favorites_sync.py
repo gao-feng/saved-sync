@@ -257,10 +257,12 @@ class HarvestStopRulesTest(unittest.TestCase):
             if "scrollTop" in expression:  # SCROLL_JS
                 counts = self.script[min(self.rounds, len(self.script) - 1)]
                 self.rounds += 1
+                if isinstance(counts, dict):
+                    return counts
                 return {"tokens": 0, "awemes": counts, "folders": 0}
             if "clear" in expression:
                 return None
-            peak = max(self.script) if self.script else 0
+            peak = max((x.get("tokens", 0) if isinstance(x, dict) else x for x in self.script), default=0)
             return {"awemes": {str(n): {} for n in range(1, peak + 1)}}
 
     def test_slow_first_page_is_not_abandoned(self):
@@ -284,6 +286,27 @@ class HarvestStopRulesTest(unittest.TestCase):
         stub = self._Stub([5] + [0] * 12)
         self._fs_harvest(stub)
         self.assertEqual(stub.rounds, 11)
+
+    def test_loading_page_does_not_stop_at_twenty(self):
+        stub = self._Stub([{"tokens": 20, "loading": True}] * 8 +
+                          [{"tokens": 50, "pagination": {"has_more": False}}] * 4)
+        harvest = self._fs_harvest(stub)
+        self.assertEqual(stub.rounds, 12)
+        self.assertTrue(harvest["discovery"]["complete"])
+        self.assertEqual(harvest["discovery"]["count"], 50)
+
+    def test_more_pages_prevent_early_stop_without_spinner(self):
+        stub = self._Stub([{"tokens": 20, "pagination": {"has_more": True}}])
+        harvest = self._fs_harvest(stub)
+        self.assertEqual(stub.rounds, 120)
+        self.assertFalse(harvest["discovery"]["complete"])
+        self.assertEqual(harvest["discovery"]["stop_reason"], "round_limit")
+
+    def test_pagination_error_is_not_completion(self):
+        stub = self._Stub([{"tokens": 20, "pagination": {"error": "rate limited"}}])
+        harvest = self._fs_harvest(stub)
+        self.assertEqual(stub.rounds, 1)
+        self.assertEqual(harvest["discovery"]["stop_reason"], "pagination_error")
 
     def _fs_harvest(self, stub):
         real_sleep = FAVORITES.time.sleep

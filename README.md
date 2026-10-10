@@ -311,6 +311,10 @@ python3 scripts/favorites_sync.py sync \
 `--scroll-rounds` 控制每篇笔记的滚动次数。清单/yt-dlp 回退路径不采集评论。
 补充开关：`--limit 5` 先试水、`--dry-run` 只列不下载、`--no-retry-failed` 跳过失败项、
 `diagnose` 打印页面实际调用了哪些接口（一条都抓不到时先看它）。
+收藏页显示加载中或分页响应表示还有下一页时，脚本会继续滚动等待。
+达到滚动上限、分页失败或无法确认列表末尾时，会打印采集不完整的警告，
+在 `sync-state.json` 的 `discovery` 字段记录原因，并返回非零退出码；已保存的帖子保留。
+可用 `--scroll-rounds 300` 增加等待次数。后台运行参数需要关闭旧专用浏览器后重新启动才能生效。
 
 这条路不导出、不读取 cookie，因此**不会触发 macOS 钥匙串的"访问机密信息"授权弹窗**。
 做法是复用 [browser_sync.py](scripts/browser_sync.py) 那一套浏览器会话：
