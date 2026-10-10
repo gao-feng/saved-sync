@@ -224,8 +224,8 @@ class HarvestStopRulesTest(unittest.TestCase):
     rounds while the collection tab hydrated ate the stability budget, and a
     background tab never fired the lazy loads at all. The rules now are: an
     empty round never counts as stable (a slow boot gets its chance), nothing
-    counts before the first item appears beyond a hard cap, and the tab is
-    brought to the front so its timers actually run.
+    counts before the first item appears beyond a hard cap. Harvesting must
+    leave the user's foreground window alone.
     """
 
     class _Stub:
@@ -238,6 +238,7 @@ class HarvestStopRulesTest(unittest.TestCase):
         def __init__(self, script):
             self.script = script
             self.rounds = 0
+            self.brought_to_front = False
 
         def harvest(self, **kwargs):
             kwargs.setdefault("rounds", 60)
@@ -249,7 +250,7 @@ class HarvestStopRulesTest(unittest.TestCase):
 
         def call(self, method, params=None, timeout=None):
             if method == "Page.bringToFront":
-                HarvestStopRulesTest._Stub.brought_to_front = True
+                self.brought_to_front = True
             return {}
 
         def evaluate(self, expression, timeout=None):
@@ -266,7 +267,7 @@ class HarvestStopRulesTest(unittest.TestCase):
         stub = self._Stub([0, 0, 5, 5, 5])
         harvest = self._fs_harvest(stub)
         self.assertEqual(len(harvest.get("awemes", {})), 5)
-        self.assertTrue(self._Stub.brought_to_front)
+        self.assertFalse(stub.brought_to_front)
 
     def test_growth_resets_and_stable_triples_stop(self):
         stub = self._Stub([3, 3, 9, 15, 15, 15])

@@ -532,15 +532,6 @@ class FavoritesSession:
         """
         emit = log or (lambda _message: None)
         self.install_hook()
-        # A background tab has its timers and observers throttled, which
-        # silently kills the lazy loading the scroll is meant to trigger: a
-        # Douyin sync stopped at the first page (19 of 234 items) while its
-        # tab sat behind the user's terminal. Bring it to the front so the
-        # page actually paginates.
-        try:
-            self.call("Page.bringToFront")
-        except cdp.CdpError:
-            pass  # headless and already-focused pages may refuse; scrolling still runs
         if reset:
             self.evaluate(CLEAR_HARVEST_JS)
         if url:

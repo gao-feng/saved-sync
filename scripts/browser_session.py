@@ -184,6 +184,9 @@ def launch_browser(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=Translate",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
         *extra_args,
         url,
     ]
