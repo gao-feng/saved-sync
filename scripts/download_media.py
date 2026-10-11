@@ -39,6 +39,11 @@ from platforms import PLATFORMS, detect_platform  # noqa: E402
 
 
 IGNORED_MEDIA_SUFFIXES = {".json", ".md", ".description", ".part", ".ytdl"}
+MEDIA_SUFFIXES = {
+    ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".flv", ".ts",
+    ".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac",
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif", ".bmp", ".tiff",
+}
 URL_PLACEHOLDER = "%(id)s_%(title).80B.%(ext)s"
 
 
@@ -65,8 +70,7 @@ def collect_media(out: Path) -> list[str]:
         str(path)
         for path in sorted(out.iterdir())
         if path.is_file()
-        and path.suffix.lower() not in IGNORED_MEDIA_SUFFIXES
-        and not path.name.endswith(".info.json")
+        and path.suffix.lower() in MEDIA_SUFFIXES
     ]
 
 

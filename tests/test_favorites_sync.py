@@ -352,7 +352,7 @@ class CliTest(unittest.TestCase):
 
     def test_sync_reports_a_missing_session_instead_of_crashing(self):
         out, err = StringIO(), StringIO()
-        with mock.patch.object(
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}), mock.patch.object(
             FAVORITES.browser_session, "is_browser_running", return_value=False
         ), redirect_stdout(out), redirect_stderr(err):
             code = FAVORITES.main(["sync", "--output-dir", "/tmp/never"])
@@ -406,7 +406,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             index = 0
             if "cursor=" in self.path:
                 index = int(self.path.split("cursor=")[1].split("&")[0] or 0)
-            payload = self.pages[index] if index < len(self.pages) else {"notes": [], "folders": []}
+            payload = dict(self.pages[index]) if index < len(self.pages) else {"notes": [], "folders": []}
+            if "/note/collect/page" in self.path:
+                payload.setdefault("has_more", index < len(self.pages) - 1)
             self._send(json.dumps({"success": True, "data": payload}), "application/json")
             return
         self._send(
@@ -546,6 +548,31 @@ class FavoritesBrowserTest(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(err):
             code = FAVORITES.main(argv)
         return code, out.getvalue(), err.getvalue()
+
+    def test_hook_extracts_full_images_and_h264_video_without_preview_urls(self):
+        note_id = XHS_IDS[0]
+        note = {"noteId": note_id, "type": "normal", "desc": "body",
+                "imageList": [{"urlPre": "https://cdn/preview.jpg",
+                               "infoList": [{"imageScene": "WB_DFT", "url": "https://cdn/full.jpg"}]}]}
+        with FAVORITES.FavoritesSession(endpoint=self.endpoint, origin=self.mock.origin, timeout=10) as session:
+            session.session.navigate(self.mock.origin)
+            session.evaluate(FAVORITES.HOOK_JS)
+            session.evaluate("__ins2anki_scan_value(" + json.dumps(note) + ")")
+            capture = session.evaluate(FAVORITES.READ_HARVEST_JS)
+            self.assertEqual(capture['notes'][note_id]['images'], ['https://cdn/full.jpg'])
+            note['type'] = 'video'
+            note['video'] = {'media': {'stream': {'h264': [
+                {'masterUrl': 'https://cdn/video.mp4', 'backupUrls': ['https://cdn/backup.mp4']}],
+                'h265': [{'masterUrl': 'https://cdn/hevc.mp4'}]}}}
+            session.evaluate("__ins2anki_scan_value(" + json.dumps(note) + ")")
+            capture = session.evaluate(FAVORITES.READ_HARVEST_JS)
+            self.assertEqual(capture['notes'][note_id]['videos'], ['https://cdn/video.mp4', 'https://cdn/backup.mp4'])
+            note['video'] = {'media': {'stream': {
+                'EF4': [{'format': 'mp4', 'audioChannels': 2, 'width': 720, 'masterUrl': 'http://cdn/playable.mp4'}],
+                'EF5': [{'format': 'fmp4', 'audioChannels': 0, 'width': 1080, 'masterUrl': 'https://cdn/silent.m4s'}]}}}
+            session.evaluate("__ins2anki_scan_value(" + json.dumps(note) + ")")
+            capture = session.evaluate(FAVORITES.READ_HARVEST_JS)
+            self.assertEqual(capture['notes'][note_id]['videos'], ['https://cdn/playable.mp4'])
 
     def fake_download(self, downloader, url, output_dir, cookies, cookies_from_browser):
         directory = Path(output_dir)

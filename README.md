@@ -417,3 +417,18 @@ missing posts.
 - Saved items are named after their **title**, not their note/aweme id: the downloaders still write `<id>_<title>.<n>.<ext>` into `<output>/<id>`, and the shared engine renames both the folder and the files as soon as the title is in the manifest, so an 图文 note reads `显微镜视野如何调节为一个视野/显微镜视野如何调节为一个视野.1.jpg`. Two items can share a title — the second becomes `<title> (2)`. A note with no title field of its own is named after the first line of its description, which is what the feed shows instead; items whose platform reports no title at all (Instagram only ever reports `Video by <user>`) keep their shortcode. Trees synced before this are renamed in place with `python3 scripts/retitle_items.py --root xhs-saved` (`--dry-run` first); it also repoints their `sync-state.json`, so nothing is downloaded twice.
 - Item state (`sync-state.json`) is per output directory. An item counts as completed only while its manifest still references a non-empty media file; if the media is deleted, the next run re-downloads it.
 - After editing any skill file, restart opencode so the change takes effect.
+
+### 小红书补下载与评论恢复
+
+若 yt-dlp 返回空格式列表，一键同步会打开已登录浏览器中的原笔记，使用页面暴露的完整图片或带音频的完整 MP4 直链补下载（实际可为 H.264 或 HEVC）。
+图文帖会保留全部图片；视频帖拿不到视频直链时会报告失败，封面不算视频。多线程只并行下载，操作同一浏览器标签时会排队。
+
+只重试已有状态中的失败/不完整笔记，无需重新滚动收藏列表：
+
+```bash
+python3 scripts/favorites_sync.py sync --platform xiaohongshu --output-dir xhs-saved/收藏 --retry-only --jobs 4
+```
+
+已有正文和成功返回的可见评论会复用缓存。需要重新采集已有评论时加 `--refresh-comments`。
+CDP 连接重置后会重连并重试一次；刷新失败不会覆盖已经保存的评论。评论缓存表示页面实际返回过评论列表，不保证全部评论已加载。
+`collection completeness unconfirmed (round_limit)` 表示收藏扫描达到轮数上限，不代表已完整枚举；可增加 `--scroll-rounds` 继续扫描。

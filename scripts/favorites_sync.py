@@ -32,6 +32,7 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -133,8 +134,27 @@ HOOK_JS = r"""
     const id = ID_KEYS.map((key) => str(node[key])).find((value) => NOTE_RE.test(value));
     if (!id) return;
     if (typeof node.desc === "string" && (node.imageList || node.image_list || node.video)) {
+      const streams = ((node.video || {}).media || {}).stream || {};
+      const videos = [];
+      // New responses use EF* stream names rather than h264. Select
+      // progressive MP4s with audio; fmp4/m4s variants can be silent video.
+      const progressive = Object.values(streams).flat().filter(entry =>
+        entry && entry.format === "mp4" && Number(entry.audioChannels) > 0);
+      progressive.sort((a, b) => Number(b.width || 0) - Number(a.width || 0));
+      for (const entry of [...(streams.h264 || []), ...progressive]) {
+        for (const url of [entry.masterUrl, ...(entry.backupUrls || [])]) {
+          if (typeof url === "string" && /^https?:\/\//.test(url)) {
+            videos.push(url.replace(/^http:/, "https:"));
+          }
+        }
+      }
+      const images = (node.imageList || node.image_list || []).map(image => {
+        const full = (image.infoList || []).find(info => info.imageScene === "WB_DFT");
+        return image.urlDefault || (full || {}).url || image.url || "";
+      });
       state.notes[id] = {title: node.title || "", description: node.desc,
-        author: (node.user || {}).nickname || ""};
+        author: (node.user || {}).nickname || "", type: node.type || "",
+        videos: [...new Set(videos)], images};
       dirty = true;
     }
     for (const key of TOKEN_KEYS) {
@@ -677,6 +697,88 @@ def douyin_download(record: dict, directory: Path) -> tuple[bool, str]:
     return True, f"{len(media)} file(s)"
 
 
+def harvest_note(session: FavoritesSession, url: str, delay_ms: int) -> dict:
+    """Capture one note; replace a broken CDP connection before retrying."""
+    for attempt in range(2):
+        try:
+            return session.harvest(url, rounds=3, delay_ms=min(delay_ms, 1000), stable_rounds=3)
+        except cdp.CdpError:
+            if attempt:
+                raise
+            session.close()
+            session._hook_installed = False
+            session.connect()
+
+
+def xhs_download(record: dict, note_id: str, url: str, directory: Path) -> tuple[bool, str]:
+    """Download the genuine note media exposed by the logged-in page."""
+    videos = record.get("videos") or []
+    images = record.get("images") or []
+    if record.get("type") == "video" and not videos:
+        return False, "browser found a video note but no video URL; refusing its cover"
+    if not videos and (not images or not all(images)):
+        return False, "browser did not expose a complete media list for this note"
+    directory.mkdir(parents=True, exist_ok=True)
+    headers = {"User-Agent": browser_session.USER_AGENT, "Referer": XHS_ORIGIN + "/"}
+    files = []
+    try:
+        if videos:
+            destination = directory / f"{note_id}.mp4"
+            failure = None
+            for source in videos:
+                try:
+                    browser_session.download_url(source, destination, headers=headers)
+                    failure = None
+                    break
+                except browser_session.SessionError as exc:
+                    failure = exc
+            if failure is not None:
+                return False, str(failure)
+            files.append(str(destination))
+        else:
+            for index, source in enumerate(images, 1):
+                destination = directory / f"{note_id}_{index}.jpg"
+                if not destination.is_file() or not destination.stat().st_size:
+                    browser_session.download_url(source, destination, headers=headers)
+                files.append(str(destination))
+    except browser_session.SessionError as exc:
+        return False, str(exc)
+    manifest = {"source_url": url, "platform": "xiaohongshu",
+                "kind": "video" if videos else "images", "media": files,
+                "metadata": [{"id": note_id, "title": record.get("title"),
+                    "description": record.get("description"), "uploader": record.get("author")}],
+                "session": {"downloader": "browser-session"}}
+    sync_common.write_json_atomic(directory / "manifest.json", manifest)
+    import xhs_markdown
+    xhs_markdown.save(directory, note_id, url, {"notes": {note_id: record}})
+    return True, f"browser fallback: {len(files)} file(s)"
+
+
+def xhs_download_fn(args):
+    # All fallback navigations use the same tab, so serialize them even when
+    # yt-dlp and CDN transfers are running in parallel.
+    lock = threading.Lock()
+    def download(downloader, url, output_dir, cookies, cookies_from_browser):
+        ok, detail = sync_common.run_download(downloader, url, output_dir, cookies, cookies_from_browser)
+        if ok:
+            return ok, detail
+        note_id = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if not lock.acquire(timeout=max(args.timeout * 6, 120)):
+            return False, detail + "; browser fallback timed out waiting for its tab"
+        try:
+            with open_session(args) as session:
+                capture = harvest_note(session, url, args.scroll_delay_ms)
+            record = (capture.get("notes") or {}).get(note_id)
+            if not isinstance(record, dict):
+                return False, detail + "; browser did not return this note"
+        except (browser_session.SessionError, cdp.CdpError) as exc:
+            return False, detail + f"; browser fallback: {exc}"
+        finally:
+            lock.release()
+        return xhs_download(record, note_id, url, Path(output_dir))
+    return download
+
+
 def douyin_download_fn(records: dict[str, dict]):
     """Adapt :func:`douyin_download` to the shared engine's download hook."""
 
@@ -834,26 +936,44 @@ def command_sync(args: argparse.Namespace) -> int:
 
 
 def _command_sync(args: argparse.Namespace) -> int:
-    with open_session(args) as session:
-        url = favorites_url(args, session)
-        harvest = session.harvest(
-            url, rounds=args.scroll_rounds, delay_ms=args.scroll_delay_ms, log=log
-        )
-        if args.folder:
-            if click_folder(session, args.folder, args.timeout):
-                log(f"opened 收藏夹 「{args.folder}」")
-                time.sleep(1.5)
-                harvest = session.harvest(
-                    rounds=args.scroll_rounds,
-                    delay_ms=args.scroll_delay_ms,
-                    reset=False,
-                    log=log,
-                )
-            else:
-                log(f"warning: no sidebar entry named 「{args.folder}」; syncing the current list")
+    output_dir = Path(args.output_dir)
+    state_file = Path(args.state_file) if args.state_file else output_dir / "sync-state.json"
+    if args.retry_only:
+        if args.platform != "xiaohongshu":
+            log("error: --retry-only currently supports Xiaohongshu only")
+            return 2
+        state = sync_common.load_state(state_file)
+        url = state.get("source") or args.favorites_url or XHS_FAVORITES_URL
+        harvest = {}
+        discovered = [("xiaohongshu", note_id, item["url"])
+                      for note_id, item in state["items"].items()
+                      if isinstance(item, dict) and item.get("url")
+                      and item.get("platform", "xiaohongshu") == "xiaohongshu"
+                      and item.get("status") in {"failed", "incomplete"}]
+    else:
+        with open_session(args) as session:
+            url = favorites_url(args, session)
+            harvest = session.harvest(
+                url, rounds=args.scroll_rounds, delay_ms=args.scroll_delay_ms, log=log
+            )
+            if args.folder:
+                if click_folder(session, args.folder, args.timeout):
+                    log(f"opened 收藏夹 「{args.folder}」")
+                    time.sleep(1.5)
+                    harvest = session.harvest(
+                        rounds=args.scroll_rounds,
+                        delay_ms=args.scroll_delay_ms,
+                        reset=False,
+                        log=log,
+                    )
+                else:
+                    log(f"warning: no sidebar entry named 「{args.folder}」; syncing the current list")
 
-    discovered = discovered_for(args.platform, harvest)
+        discovered = discovered_for(args.platform, harvest)
     if not discovered:
+        if args.retry_only:
+            print(json.dumps({"attempted": 0, "note": "no failed items to retry"}))
+            return 0
         print(json.dumps({
             "error": "the page exposed no favorites; is this profile logged in?",
             "favorites_url": url,
@@ -870,7 +990,7 @@ def _command_sync(args: argparse.Namespace) -> int:
     download_fn = (
         douyin_download_fn({record["url"]: record for record in records.values()})
         if args.platform == "douyin"
-        else sync_common.run_download
+        else xhs_download_fn(args)
     )
     output_dir = Path(args.output_dir)
     state_file = Path(args.state_file) if args.state_file else output_dir / "sync-state.json"
@@ -903,10 +1023,11 @@ def _command_sync(args: argparse.Namespace) -> int:
                 directory = sync_common.item_directory(item, output_dir.resolve(), note_id)
                 if not (directory / "manifest.json").exists():
                     continue
+                if not args.refresh_comments and xhs_markdown.comments_cached(directory):
+                    continue
                 log(f"saving Markdown and visible comments: {note_id}")
                 try:
-                    capture = session.harvest(note_url, rounds=args.scroll_rounds,
-                        delay_ms=args.scroll_delay_ms, stable_rounds=args.scroll_rounds)
+                    capture = harvest_note(session, note_url, args.scroll_delay_ms)
                     xhs_markdown.save(directory, note_id, note_url, capture)
                 except Exception as exc:
                     xhs_markdown.save(directory, note_id, note_url, {}, error=str(exc))
@@ -969,6 +1090,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--jobs", type=int, default=1, help="parallel downloads")
     sync.add_argument("--no-retry-failed", action="store_true")
     sync.add_argument("--dry-run", action="store_true")
+    sync.add_argument("--retry-only", action="store_true",
+                      help="retry failed Xiaohongshu items from local state without scrolling favorites")
+    sync.add_argument("--refresh-comments", action="store_true",
+                      help="refresh already captured visible comments (default: reuse successful archives)")
     sync.set_defaults(func=command_sync)
     return parser
 
